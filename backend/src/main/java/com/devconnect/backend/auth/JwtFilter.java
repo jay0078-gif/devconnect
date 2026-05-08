@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -27,26 +28,18 @@ public class JwtFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
 
         String header = request.getHeader("Authorization");
-        log.info("Authorization header: {}", header);
 
         if (header != null && header.startsWith("Bearer ")) {
             String token = header.substring(7);
-            log.info("Token found, validating...");
-
             if (jwtUtil.isValid(token)) {
                 String email = jwtUtil.extractEmail(token);
-                log.info("Token valid for email: {}", email);
-
+                // KEY FIX: must pass at least one authority, not empty List.of()
                 UsernamePasswordAuthenticationToken auth =
                         new UsernamePasswordAuthenticationToken(
-                                email, null, List.of()
+                                email, null, List.of(new SimpleGrantedAuthority("ROLE_USER"))
                         );
                 SecurityContextHolder.getContext().setAuthentication(auth);
-            } else {
-                log.warn("Token is INVALID");
             }
-        } else {
-            log.warn("No Bearer token found in request");
         }
 
         chain.doFilter(request, response);

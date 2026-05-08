@@ -24,3 +24,8 @@ server:
 jwt:
   secret: devconnect-super-secret-key-must-be-at-least-32-chars
   expiration: 86400000
+
+  spring:
+    jackson:
+      serialization:
+        write-dates-as-timestamps: false
