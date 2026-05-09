@@ -8,7 +8,6 @@ import com.devconnect.backend.kafka.NotificationEvent;
 import com.devconnect.backend.kafka.NotificationProducer;
 import com.devconnect.backend.repository.PostRepository;
 import com.devconnect.backend.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
@@ -31,21 +30,25 @@ public class PostService {
     private final RedisTemplate<String, Object> redisTemplate;
     private final NotificationProducer notificationProducer;
     private final FollowService followService;
+    private final TrendingService trendingService;
 
     private static final String LIKE_KEY_PREFIX = "likes:post:";
 
-    // @Lazy on FollowService breaks the circular dependency
-    // PostService → FollowService → PostRepository → (no PostService)
+    // @Lazy breaks circular dependency:
+    // PostService → FollowService → PostRepository (fine)
+    // PostService → TrendingService → PostService (@Lazy breaks this)
     public PostService(PostRepository postRepository,
                        UserRepository userRepository,
                        RedisTemplate<String, Object> redisTemplate,
                        NotificationProducer notificationProducer,
-                       @Lazy FollowService followService) {
+                       @Lazy FollowService followService,
+                       @Lazy TrendingService trendingService) {
         this.postRepository = postRepository;
         this.userRepository = userRepository;
         this.redisTemplate = redisTemplate;
         this.notificationProducer = notificationProducer;
         this.followService = followService;
+        this.trendingService = trendingService;
     }
 
     // ─────────────────────────────────────────
@@ -93,6 +96,8 @@ public class PostService {
 
     // ─────────────────────────────────────────
     // GET POST BY ID — Cache-aside
+    // First call: Redis miss → MySQL → store in Redis
+    // Second call: Redis hit → no MySQL query
     // ─────────────────────────────────────────
     @Cacheable(value = "posts", key = "#id")
     public PostDto getPostById(Long id) {
@@ -103,7 +108,8 @@ public class PostService {
     }
 
     // ─────────────────────────────────────────
-    // GET FEED — paginated global feed (not personalized)
+    // GET GLOBAL FEED — paginated, newest first
+    // Not cached — changes too frequently
     // ─────────────────────────────────────────
     public Page<PostDto> getFeed(int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
@@ -111,7 +117,7 @@ public class PostService {
                 .map(this::mapToDto);
     }
 
-    // GET posts by a specific user
+    // GET posts by a specific user — for profile page
     public Page<PostDto> getPostsByUser(Long userId, int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
         return postRepository.findByAuthorIdOrderByCreatedAtDesc(userId, pageable)
@@ -119,14 +125,23 @@ public class PostService {
     }
 
     // ─────────────────────────────────────────
-    // LIKE — Write-behind + Kafka notification
+    // LIKE POST
+    // Write-behind: Redis INCR (instant, atomic)
+    // Trending: ZINCRBY on sorted set (instant)
+    // Kafka: notify post author async
+    // DB flush: happens every 30s via @Scheduled
     // ─────────────────────────────────────────
     public Long likePost(Long postId, String actorEmail) {
+        // Write-behind: increment like count in Redis
         String key = LIKE_KEY_PREFIX + postId;
         Long newCount = redisTemplate.opsForValue().increment(key);
         log.info("WRITE-BEHIND — like count for post {} is now {} in Redis",
                 postId, newCount);
 
+        // Update trending sorted set score
+        trendingService.incrementTrendingScore(postId);
+
+        // Kafka: notify post author
         postRepository.findById(postId).ifPresent(post -> {
             User actor = userRepository.findByEmail(actorEmail).orElse(null);
             if (actor == null) return;
@@ -144,7 +159,11 @@ public class PostService {
         return newCount;
     }
 
-    // Flush like counts to MySQL every 30 seconds
+    // ─────────────────────────────────────────
+    // FLUSH LIKES TO DB — runs every 30 seconds
+    // Batches all Redis like counts into single DB writes
+    // 10,000 likes → still only 1 DB write per post per 30s
+    // ─────────────────────────────────────────
     @Scheduled(fixedRate = 30000)
     public void flushLikesToDb() {
         Set<String> keys = redisTemplate.keys(LIKE_KEY_PREFIX + "*");
@@ -166,7 +185,7 @@ public class PostService {
     }
 
     // ─────────────────────────────────────────
-    // DELETE POST — evict from cache
+    // DELETE POST — remove from DB and cache
     // ─────────────────────────────────────────
     @CacheEvict(value = "posts", key = "#postId")
     public void deletePost(Long postId, String email) {
@@ -181,6 +200,10 @@ public class PostService {
         log.info("Post {} deleted and evicted from cache", postId);
     }
 
+    // ─────────────────────────────────────────
+    // MAPPER — never expose entity directly
+    // Password field stays inside the entity, never in DTO
+    // ─────────────────────────────────────────
     private PostDto mapToDto(Post post) {
         PostDto dto = new PostDto();
         dto.setId(post.getId());
