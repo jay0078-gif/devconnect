@@ -31,6 +31,7 @@ public class SecurityConfig {
                         s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers(org.springframework.http.HttpMethod.DELETE, "/api/users/me").authenticated()
                         .anyRequest().authenticated()
                 )
                 // JwtFilter first — sets user identity

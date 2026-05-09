@@ -12,4 +12,6 @@ public interface PostRepository extends JpaRepository<Post, Long> {
 
     // Get all posts, newest first — for global feed
     Page<Post> findAllByOrderByCreatedAtDesc(Pageable pageable);
+
+    void deleteByAuthorId(Long authorId);
 }

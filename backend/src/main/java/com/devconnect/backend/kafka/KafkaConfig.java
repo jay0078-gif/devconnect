@@ -24,4 +24,12 @@ public class KafkaConfig {
                 .replicas(1)
                 .build();
     }
+
+    @Bean
+    public NewTopic deleteAccountSagaTopic() {
+        return TopicBuilder.name("delete-account-saga")
+                .partitions(3)
+                .replicas(1)
+                .build();
+    }
 }
