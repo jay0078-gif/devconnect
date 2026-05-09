@@ -12,28 +12,48 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import java.time.ZoneOffset;
 import java.util.Set;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class PostService {
 
     private final PostRepository postRepository;
     private final UserRepository userRepository;
     private final RedisTemplate<String, Object> redisTemplate;
-    private final NotificationProducer notificationProducer; // ← NEW
+    private final NotificationProducer notificationProducer;
+    private final FollowService followService;
 
     private static final String LIKE_KEY_PREFIX = "likes:post:";
 
+    // @Lazy on FollowService breaks the circular dependency
+    // PostService → FollowService → PostRepository → (no PostService)
+    public PostService(PostRepository postRepository,
+                       UserRepository userRepository,
+                       RedisTemplate<String, Object> redisTemplate,
+                       NotificationProducer notificationProducer,
+                       @Lazy FollowService followService) {
+        this.postRepository = postRepository;
+        this.userRepository = userRepository;
+        this.redisTemplate = redisTemplate;
+        this.notificationProducer = notificationProducer;
+        this.followService = followService;
+    }
+
     // ─────────────────────────────────────────
-    // CREATE POST — Write-through + Kafka event
+    // CREATE POST
+    // 1. Save to MySQL
+    // 2. Write-through to Redis
+    // 3. Fan-out to all followers' feeds
+    // 4. Kafka event
     // ─────────────────────────────────────────
     public PostDto createPost(String email, CreatePostRequest request) {
         User author = userRepository.findByEmail(email)
@@ -49,12 +69,16 @@ public class PostService {
 
         PostDto dto = mapToDto(saved);
 
-        // Write-through: cache immediately after save
+        // Step 2: Write-through cache
         redisTemplate.opsForValue().set("post:" + saved.getId(), dto);
         log.info("Post {} cached in Redis (write-through)", saved.getId());
 
-        // Kafka: publish POST_CREATED event asynchronously
-        // Controller returns INSTANTLY — Kafka handles delivery in background
+        // Step 3: Fan-out to all followers' Redis feeds
+        long timestamp = saved.getCreatedAt()
+                .toEpochSecond(ZoneOffset.UTC);
+        followService.fanOutNewPost(author.getId(), saved.getId(), timestamp);
+
+        // Step 4: Kafka event
         notificationProducer.sendPostEvent(new NotificationEvent(
                 "POST_CREATED",
                 author.getId(),
@@ -79,7 +103,7 @@ public class PostService {
     }
 
     // ─────────────────────────────────────────
-    // GET FEED — paginated, not cached
+    // GET FEED — paginated global feed (not personalized)
     // ─────────────────────────────────────────
     public Page<PostDto> getFeed(int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
@@ -100,10 +124,9 @@ public class PostService {
     public Long likePost(Long postId, String actorEmail) {
         String key = LIKE_KEY_PREFIX + postId;
         Long newCount = redisTemplate.opsForValue().increment(key);
-        log.info("WRITE-BEHIND — like count for post {} is now {} in Redis", postId, newCount);
+        log.info("WRITE-BEHIND — like count for post {} is now {} in Redis",
+                postId, newCount);
 
-        // Kafka: notify post author that someone liked their post
-        // This runs async — like response returns instantly
         postRepository.findById(postId).ifPresent(post -> {
             User actor = userRepository.findByEmail(actorEmail).orElse(null);
             if (actor == null) return;
@@ -112,7 +135,7 @@ public class PostService {
                     "POST_LIKED",
                     actor.getId(),
                     actor.getUsername(),
-                    post.getAuthor().getId(),  // recipient = post author
+                    post.getAuthor().getId(),
                     postId,
                     actor.getUsername() + " liked your post: " + post.getTitle()
             ));
@@ -121,7 +144,7 @@ public class PostService {
         return newCount;
     }
 
-    // Runs every 30 seconds — flushes Redis like counts to MySQL
+    // Flush like counts to MySQL every 30 seconds
     @Scheduled(fixedRate = 30000)
     public void flushLikesToDb() {
         Set<String> keys = redisTemplate.keys(LIKE_KEY_PREFIX + "*");
