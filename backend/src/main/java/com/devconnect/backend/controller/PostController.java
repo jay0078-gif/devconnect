@@ -2,63 +2,90 @@ package com.devconnect.backend.controller;
 
 import com.devconnect.backend.dto.CreatePostRequest;
 import com.devconnect.backend.dto.PostDto;
-import com.devconnect.backend.service.PostService;
-import jakarta.validation.Valid;
+import com.devconnect.backend.service.FollowService;
+import com.devconnect.backend.service.PostCommandService;
+import com.devconnect.backend.service.PostQueryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/posts")
 @RequiredArgsConstructor
 public class PostController {
 
-    private final PostService postService;
+    // CQRS: controller routes to the right side
+    // Writes → PostCommandService
+    // Reads  → PostQueryService
+    private final PostCommandService postCommandService;
+    private final PostQueryService postQueryService;
+    private final FollowService followService;
 
+    // ── COMMAND: Create post ──
     @PostMapping
-    public ResponseEntity<PostDto> create(
-            Authentication authentication,
-            @Valid @RequestBody CreatePostRequest request) {
-        String email = authentication.getName();
-        return ResponseEntity.ok(postService.createPost(email, request));
+    public ResponseEntity<PostDto> createPost(
+            Authentication auth,
+            @RequestBody CreatePostRequest request) {
+        return ResponseEntity.ok(
+                postCommandService.createPost(auth.getName(), request));
     }
 
-    @GetMapping("/{id}")
-    public ResponseEntity<PostDto> getPost(@PathVariable Long id) {
-        return ResponseEntity.ok(postService.getPostById(id));
+    // ── COMMAND: Like post ──
+    @PostMapping("/{id}/like")
+    public ResponseEntity<Long> likePost(
+            @PathVariable Long id,
+            Authentication auth) {
+        return ResponseEntity.ok(
+                postCommandService.likePost(id, auth.getName()));
     }
 
-    @GetMapping("/feed")
-    public ResponseEntity<Page<PostDto>> getFeed(
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "10") int size) {
-        return ResponseEntity.ok(postService.getFeed(page, size));
-    }
-
-    @GetMapping("/user/{userId}")
-    public ResponseEntity<Page<PostDto>> getByUser(
-            @PathVariable Long userId,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "10") int size) {
-        return ResponseEntity.ok(postService.getPostsByUser(userId, page, size));
-    }
-
-
-
+    // ── COMMAND: Delete post ──
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(
-            Authentication authentication,
-            @PathVariable Long id) {
-        postService.deletePost(id, authentication.getName());
+    public ResponseEntity<Void> deletePost(
+            @PathVariable Long id,
+            Authentication auth) {
+        postCommandService.deletePost(id, auth.getName());
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/{id}/like")
-    public ResponseEntity<Long> like(
-            Authentication authentication,
-            @PathVariable Long id) {
-        return ResponseEntity.ok(postService.likePost(id, authentication.getName()));
+    // ── QUERY: Get single post ──
+    @GetMapping("/{id}")
+    public ResponseEntity<PostDto> getPost(@PathVariable Long id) {
+        return ResponseEntity.ok(postQueryService.getPostById(id));
+    }
+
+    // ── QUERY: Global feed (paginated) ──
+    @GetMapping("/feed/global")
+    public ResponseEntity<Page<PostDto>> getGlobalFeed(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        return ResponseEntity.ok(postQueryService.getFeed(page, size));
+    }
+
+    // ── QUERY: Personalized feed from Redis ──
+    // Post IDs come from Redis sorted set (fan-out on write)
+    // Then hydrated into PostDtos by PostQueryService
+    @GetMapping("/feed/me")
+    public ResponseEntity<List<PostDto>> getMyFeed(
+            Authentication auth,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        List<Long> postIds = followService.getFeedPostIds(
+                auth.getName(), page, size);
+        return ResponseEntity.ok(
+                postQueryService.getPersonalizedFeed(postIds));
+    }
+
+    // ── QUERY: Posts by a specific user ──
+    @GetMapping("/user/{userId}")
+    public ResponseEntity<Page<PostDto>> getPostsByUser(
+            @PathVariable Long userId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+        return ResponseEntity.ok(
+                postQueryService.getPostsByUser(userId, page, size));
     }
 }

@@ -2,7 +2,7 @@ package com.devconnect.backend.controller;
 
 import com.devconnect.backend.dto.PostDto;
 import com.devconnect.backend.service.FollowService;
-import com.devconnect.backend.service.PostService;
+import com.devconnect.backend.service.PostQueryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -16,9 +16,8 @@ import java.util.Map;
 public class FollowController {
 
     private final FollowService followService;
-    private final PostService postService;
+    private final PostQueryService postQueryService;
 
-    // Follow a user
     @PostMapping("/{userId}")
     public ResponseEntity<String> follow(
             Authentication authentication,
@@ -27,7 +26,6 @@ public class FollowController {
                 followService.follow(authentication.getName(), userId));
     }
 
-    // Unfollow a user
     @DeleteMapping("/{userId}")
     public ResponseEntity<String> unfollow(
             Authentication authentication,
@@ -36,7 +34,7 @@ public class FollowController {
                 followService.unfollow(authentication.getName(), userId));
     }
 
-    // Get personalized feed from Redis sorted set
+    // QUERY side: get post IDs from Redis, hydrate via PostQueryService
     @GetMapping("/feed")
     public ResponseEntity<List<PostDto>> getFeed(
             Authentication authentication,
@@ -47,13 +45,12 @@ public class FollowController {
                 authentication.getName(), page, size);
 
         List<PostDto> posts = postIds.stream()
-                .map(postService::getPostById)
+                .map(postQueryService::getPostById)
                 .toList();
 
         return ResponseEntity.ok(posts);
     }
 
-    // Get follower/following counts for a user
     @GetMapping("/{userId}/stats")
     public ResponseEntity<Map<String, Long>> getStats(
             @PathVariable Long userId) {

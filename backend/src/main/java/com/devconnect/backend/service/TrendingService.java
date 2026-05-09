@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 @Service
@@ -20,43 +21,19 @@ public class TrendingService {
 
     private final RedisTemplate<String, Object> redisTemplate;
     private final PostRepository postRepository;
-    private final PostService postService;
+    private final PostQueryService postQueryService;
 
     private static final String TRENDING_KEY = "trending:posts";
     private static final String TRENDING_DAILY_KEY = "trending:posts:daily";
     private static final int TOP_N = 10;
 
-    // ─────────────────────────────────────────
-    // Called every time a post is liked
-    // ZINCRBY increments the score atomically
-    // Safe under millions of concurrent likes
-    // ─────────────────────────────────────────
     public void incrementTrendingScore(Long postId) {
-        // Global trending — all time
-        redisTemplate.opsForZSet().incrementScore(
-                TRENDING_KEY,
-                postId.toString(),
-                1.0
-        );
-
-        // Daily trending — expires after 24 hours
-        redisTemplate.opsForZSet().incrementScore(
-                TRENDING_DAILY_KEY,
-                postId.toString(),
-                1.0
-        );
-
-        // Set TTL on daily key so it auto-resets every 24 hours
+        redisTemplate.opsForZSet().incrementScore(TRENDING_KEY, postId.toString(), 1.0);
+        redisTemplate.opsForZSet().incrementScore(TRENDING_DAILY_KEY, postId.toString(), 1.0);
         redisTemplate.expire(TRENDING_DAILY_KEY, Duration.ofHours(24));
-
         log.info("TRENDING — incremented score for post {}", postId);
     }
 
-    // ─────────────────────────────────────────
-    // GET TOP 10 TRENDING POSTS
-    // ZREVRANGE returns highest scores first
-    // Zero DB queries — pure Redis
-    // ─────────────────────────────────────────
     public List<PostDto> getTopTrending() {
         Set<Object> postIds = redisTemplate.opsForZSet()
                 .reverseRange(TRENDING_KEY, 0, TOP_N - 1);
@@ -66,13 +43,11 @@ public class TrendingService {
             return getFallbackTrending();
         }
 
-        log.info("TRENDING HIT — serving top {} from Redis sorted set",
-                postIds.size());
-
+        log.info("TRENDING HIT — serving top {} from Redis", postIds.size());
         List<PostDto> posts = new ArrayList<>();
         for (Object id : postIds) {
             try {
-                posts.add(postService.getPostById(Long.parseLong(id.toString())));
+                posts.add(postQueryService.getPostById(Long.parseLong(id.toString())));
             } catch (Exception e) {
                 log.warn("Post {} not found, skipping", id);
             }
@@ -80,7 +55,6 @@ public class TrendingService {
         return posts;
     }
 
-    // GET DAILY TRENDING — resets every 24 hours
     public List<PostDto> getDailyTrending() {
         Set<Object> postIds = redisTemplate.opsForZSet()
                 .reverseRange(TRENDING_DAILY_KEY, 0, TOP_N - 1);
@@ -90,18 +64,10 @@ public class TrendingService {
             return List.of();
         }
 
-        log.info("DAILY TRENDING HIT — serving top {} posts", postIds.size());
-
         List<PostDto> posts = new ArrayList<>();
         for (Object id : postIds) {
             try {
-                // Also get the score (like count) for display
-                Double score = redisTemplate.opsForZSet()
-                        .score(TRENDING_DAILY_KEY, id.toString());
-                PostDto post = postService.getPostById(
-                        Long.parseLong(id.toString()));
-                posts.add(post);
-                log.info("  Post {} — score: {}", id, score);
+                posts.add(postQueryService.getPostById(Long.parseLong(id.toString())));
             } catch (Exception e) {
                 log.warn("Post {} not found, skipping", id);
             }
@@ -109,21 +75,21 @@ public class TrendingService {
         return posts;
     }
 
-    // GET TRENDING WITH SCORES — useful for leaderboard UI
-    public List<java.util.Map<String, Object>> getTrendingWithScores() {
+    public List<Map<String, Object>> getTrendingWithScores() {
         Set<ZSetOperations.TypedTuple<Object>> tuples = redisTemplate
                 .opsForZSet()
                 .reverseRangeWithScores(TRENDING_KEY, 0, TOP_N - 1);
 
         if (tuples == null || tuples.isEmpty()) return List.of();
 
-        List<java.util.Map<String, Object>> result = new ArrayList<>();
+        List<Map<String, Object>> result = new ArrayList<>();
         int rank = 1;
         for (ZSetOperations.TypedTuple<Object> tuple : tuples) {
             try {
+                if (tuple.getValue() == null || tuple.getScore() == null) continue;
                 Long postId = Long.parseLong(tuple.getValue().toString());
-                PostDto post = postService.getPostById(postId);
-                result.add(java.util.Map.of(
+                PostDto post = postQueryService.getPostById(postId);
+                result.add(Map.of(
                         "rank", rank++,
                         "post", post,
                         "likeScore", tuple.getScore()
@@ -135,20 +101,14 @@ public class TrendingService {
         return result;
     }
 
-    // Fallback — if Redis has no data, query DB directly
-    // This happens on first startup before any likes
     private List<PostDto> getFallbackTrending() {
         return postRepository
                 .findAllByOrderByCreatedAtDesc(
                         org.springframework.data.domain.PageRequest.of(0, TOP_N))
-                .map(post -> postService.getPostById(post.getId()))
+                .map(post -> postQueryService.getPostById(post.getId()))
                 .toList();
     }
 
-    // ─────────────────────────────────────────
-    // Reset global trending weekly
-    // Runs every Monday at midnight
-    // ─────────────────────────────────────────
     @Scheduled(cron = "0 0 0 * * MON")
     public void resetWeeklyTrending() {
         redisTemplate.delete(TRENDING_KEY);
