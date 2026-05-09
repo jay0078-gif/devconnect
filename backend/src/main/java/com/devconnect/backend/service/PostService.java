@@ -4,6 +4,8 @@ import com.devconnect.backend.dto.CreatePostRequest;
 import com.devconnect.backend.dto.PostDto;
 import com.devconnect.backend.entity.Post;
 import com.devconnect.backend.entity.User;
+import com.devconnect.backend.kafka.NotificationEvent;
+import com.devconnect.backend.kafka.NotificationProducer;
 import com.devconnect.backend.repository.PostRepository;
 import com.devconnect.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +18,6 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import java.time.LocalDateTime;
 import java.util.Set;
 
 @Service
@@ -27,13 +28,12 @@ public class PostService {
     private final PostRepository postRepository;
     private final UserRepository userRepository;
     private final RedisTemplate<String, Object> redisTemplate;
+    private final NotificationProducer notificationProducer; // ← NEW
 
     private static final String LIKE_KEY_PREFIX = "likes:post:";
 
     // ─────────────────────────────────────────
-    // CREATE POST
-    // Write-through: save to MySQL then cache immediately
-    // So first GET after create is a cache HIT not miss
+    // CREATE POST — Write-through + Kafka event
     // ─────────────────────────────────────────
     public PostDto createPost(String email, CreatePostRequest request) {
         User author = userRepository.findByEmail(email)
@@ -50,9 +50,19 @@ public class PostService {
         PostDto dto = mapToDto(saved);
 
         // Write-through: cache immediately after save
-        // Next GET /posts/{id} = cache HIT, no DB query
         redisTemplate.opsForValue().set("post:" + saved.getId(), dto);
         log.info("Post {} cached in Redis (write-through)", saved.getId());
+
+        // Kafka: publish POST_CREATED event asynchronously
+        // Controller returns INSTANTLY — Kafka handles delivery in background
+        notificationProducer.sendPostEvent(new NotificationEvent(
+                "POST_CREATED",
+                author.getId(),
+                author.getUsername(),
+                author.getId(),
+                saved.getId(),
+                author.getUsername() + " created a new post: " + saved.getTitle()
+        ));
 
         return dto;
     }
@@ -70,7 +80,6 @@ public class PostService {
 
     // ─────────────────────────────────────────
     // GET FEED — paginated, not cached
-    // (feed changes too frequently to cache the whole page)
     // ─────────────────────────────────────────
     public Page<PostDto> getFeed(int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
@@ -86,14 +95,29 @@ public class PostService {
     }
 
     // ─────────────────────────────────────────
-    // LIKE — Write-behind pattern
-    // Redis INCR is atomic — safe under high concurrency
-    // Actual DB update happens every 30 seconds via @Scheduled
+    // LIKE — Write-behind + Kafka notification
     // ─────────────────────────────────────────
-    public Long likePost(Long postId) {
+    public Long likePost(Long postId, String actorEmail) {
         String key = LIKE_KEY_PREFIX + postId;
         Long newCount = redisTemplate.opsForValue().increment(key);
         log.info("WRITE-BEHIND — like count for post {} is now {} in Redis", postId, newCount);
+
+        // Kafka: notify post author that someone liked their post
+        // This runs async — like response returns instantly
+        postRepository.findById(postId).ifPresent(post -> {
+            User actor = userRepository.findByEmail(actorEmail).orElse(null);
+            if (actor == null) return;
+
+            notificationProducer.sendNotification(new NotificationEvent(
+                    "POST_LIKED",
+                    actor.getId(),
+                    actor.getUsername(),
+                    post.getAuthor().getId(),  // recipient = post author
+                    postId,
+                    actor.getUsername() + " liked your post: " + post.getTitle()
+            ));
+        });
+
         return newCount;
     }
 

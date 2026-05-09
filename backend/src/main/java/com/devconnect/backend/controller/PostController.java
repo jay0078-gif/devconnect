@@ -45,10 +45,7 @@ public class PostController {
         return ResponseEntity.ok(postService.getPostsByUser(userId, page, size));
     }
 
-    @PostMapping("/{id}/like")
-    public ResponseEntity<Long> like(@PathVariable Long id) {
-        return ResponseEntity.ok(postService.likePost(id));
-    }
+
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(
@@ -56,5 +53,12 @@ public class PostController {
             @PathVariable Long id) {
         postService.deletePost(id, authentication.getName());
         return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/{id}/like")
+    public ResponseEntity<Long> like(
+            Authentication authentication,
+            @PathVariable Long id) {
+        return ResponseEntity.ok(postService.likePost(id, authentication.getName()));
     }
 }
