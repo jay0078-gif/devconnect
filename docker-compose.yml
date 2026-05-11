@@ -16,7 +16,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
   redis:
     image: redis:7.2
     container_name: devconnect-redis
@@ -27,14 +26,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: devconnect-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
-
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: devconnect-kafka
@@ -45,14 +42,13 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
       timeout: 10s
       retries: 5
-
   backend:
     build:
       context: ./backend
@@ -76,6 +72,5 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       JWT_SECRET: devconnect-super-secret-key-must-be-at-least-32-chars
       JWT_EXPIRATION: 86400000
-
 volumes:
   mysql_data:
